@@ -314,9 +314,7 @@ impl Message {
                 }
                 Ok(from_value(value)?)
             }
-            _ => {
-                return Err(ProtocolError::BodySerializationError(FormatError::Unknown));
-            }
+            _ => Err(ProtocolError::BodySerializationError(FormatError::Unknown)),
         }
     }
 
