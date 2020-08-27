@@ -160,7 +160,7 @@ pub enum FormatError {
     #[cfg(feature = "serde_json")]
     #[fail(display = "{}", _0)]
     Json(serde_json::Error),
-    
+
     #[cfg(feature = "serde_yaml")]
     #[fail(display = "{}", _0)]
     Yaml(serde_yaml::Error),
@@ -218,7 +218,7 @@ impl From<serde_json::Error> for ProtocolError {
 
 #[cfg(feature = "serde_yaml")]
 impl From<serde_yaml::Error> for ProtocolError {
-    fn from(err:serde_yaml::Error) -> Self {
+    fn from(err: serde_yaml::Error) -> Self {
         Self::BodySerializationError(FormatError::Yaml(err))
     }
 }

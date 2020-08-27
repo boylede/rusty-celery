@@ -14,7 +14,7 @@ use std::process;
 use std::time::SystemTime;
 use uuid::Uuid;
 
-use crate::error::{ProtocolError, FormatError};
+use crate::error::{FormatError, ProtocolError};
 use crate::task::{Signature, Task};
 
 static ORIGIN: Lazy<Option<String>> = Lazy::new(|| {
@@ -73,7 +73,7 @@ where
             Json => "application/json",
             Yaml => "application/x-yaml",
             Pickle => "application/x-python-serialize",
-            MsgPack => "application/x-msgpack",            
+            MsgPack => "application/x-msgpack",
         };
         self.message.properties.content_type = format_name.into();
         self
@@ -120,7 +120,7 @@ where
     pub fn build(mut self) -> Result<Message, ProtocolError> {
         if let Some(params) = self.params.take() {
             let body = MessageBody::<T>::new(params);
-            
+
             let raw_body = match self.message.properties.content_type.as_str() {
                 #[cfg(feature = "serde_json")]
                 "application/json" => serde_json::to_vec(&body)?,
@@ -140,7 +140,6 @@ where
         };
         Ok(self.message)
     }
-
 }
 
 /// A `Message` is the core of the Celery protocol and is built on top of a `Broker`'s protocol.
@@ -167,7 +166,7 @@ impl Message {
         match self.properties.content_type.as_str() {
             #[cfg(feature = "serde_json")]
             "application/json" => {
-                use serde_json::{Value, from_slice, from_value};
+                use serde_json::{from_slice, from_value, Value};
                 let value: Value = from_slice(&self.raw_body)?;
                 debug!("Deserialized message body: {:?}", value);
                 if let Value::Array(ref vec) = value {
@@ -195,10 +194,10 @@ impl Message {
                     }
                 }
                 Ok(from_value::<MessageBody<T>>(value)?)
-            },
+            }
             #[cfg(feature = "serde_yaml")]
             "application/x-yaml" => {
-                use serde_yaml::{Value, from_slice, from_value};
+                use serde_yaml::{from_slice, from_value, Value};
                 let value: Value = from_slice(&self.raw_body)?;
                 debug!("Deserialized message body: {:?}", value);
                 if let Value::Sequence(ref vec) = value {
@@ -226,10 +225,10 @@ impl Message {
                     }
                 }
                 Ok(from_value(value)?)
-            },
+            }
             #[cfg(feature = "serde-pickle")]
             "application/x-python-serialize" => {
-                use serde_pickle::{Value, from_slice, from_value, HashableValue};
+                use serde_pickle::{from_slice, from_value, HashableValue, Value};
                 let value: Value = from_slice(&self.raw_body)?;
                 // debug!("Deserialized message body: {:?}", value);
                 if let Value::List(ref vec) = value {
@@ -258,11 +257,11 @@ impl Message {
                     }
                 }
                 Ok(from_value(value)?)
-            },
+            }
             #[cfg(feature = "rmp-serde")]
             "application/x-msgpack" => {
                 use rmp_serde::from_slice;
-                use rmpv::{Value, ext::from_value};
+                use rmpv::{ext::from_value, Value};
                 let value: Value = from_slice(&self.raw_body)?;
                 debug!("Deserialized message body: {:?}", value);
                 if let Value::Array(ref vec) = value {
@@ -314,7 +313,7 @@ impl Message {
                     }
                 }
                 Ok(from_value(value)?)
-            },
+            }
             _ => {
                 return Err(ProtocolError::BodySerializationError(FormatError::Unknown));
             }
