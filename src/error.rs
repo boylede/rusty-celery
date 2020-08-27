@@ -152,7 +152,37 @@ pub enum ProtocolError {
 
     /// Raised when serializing or de-serializing a message body fails.
     #[fail(display = "ProtocolError: serialization error ({})", _0)]
-    BodySerializationError(#[fail(cause)] serde_json::Error),
+    BodySerializationError(#[fail(cause)] FormatError),
+}
+
+#[derive(Debug, Fail)]
+pub enum FormatError {
+    #[cfg(feature = "serde_json")]
+    #[fail(display = "{}", _0)]
+    Json(serde_json::Error),
+    
+    #[cfg(feature = "serde_yaml")]
+    #[fail(display = "{}", _0)]
+    Yaml(serde_yaml::Error),
+
+    #[cfg(feature = "serde-pickle")]
+    #[fail(display = "{}", _0)]
+    Pickle(serde_pickle::error::Error),
+
+    #[cfg(feature = "rmp-serde")]
+    #[fail(display = "{}", _0)]
+    MsgPackDecode(rmp_serde::decode::Error),
+    #[cfg(feature = "rmp-serde")]
+    #[fail(display = "{}", _0)]
+    MsgPackEncode(rmp_serde::encode::Error),
+    #[cfg(feature = "rmp-serde")]
+    #[fail(display = "{}", _0)]
+    MsgPackValue(rmpv::ext::Error),
+
+    // only included because we are using strings over in protocol::Message.body() to decide the protocol
+    // and we want an error for when that fails.
+    #[fail(display = "Unknown format err")]
+    Unknown,
 }
 
 impl From<BrokerError> for CeleryError {
@@ -179,9 +209,44 @@ impl From<globset::Error> for CeleryError {
     }
 }
 
+#[cfg(feature = "serde_json")]
 impl From<serde_json::Error> for ProtocolError {
     fn from(err: serde_json::Error) -> Self {
-        Self::BodySerializationError(err)
+        Self::BodySerializationError(FormatError::Json(err))
+    }
+}
+
+#[cfg(feature = "serde_yaml")]
+impl From<serde_yaml::Error> for ProtocolError {
+    fn from(err:serde_yaml::Error) -> Self {
+        Self::BodySerializationError(FormatError::Yaml(err))
+    }
+}
+
+#[cfg(feature = "serde-pickle")]
+impl From<serde_pickle::error::Error> for ProtocolError {
+    fn from(err: serde_pickle::error::Error) -> Self {
+        Self::BodySerializationError(FormatError::Pickle(err))
+    }
+}
+
+#[cfg(feature = "rmp-serde")]
+impl From<rmp_serde::decode::Error> for ProtocolError {
+    fn from(err: rmp_serde::decode::Error) -> Self {
+        Self::BodySerializationError(FormatError::MsgPackDecode(err))
+    }
+}
+
+#[cfg(feature = "rmp-serde")]
+impl From<rmp_serde::encode::Error> for ProtocolError {
+    fn from(err: rmp_serde::encode::Error) -> Self {
+        Self::BodySerializationError(FormatError::MsgPackEncode(err))
+    }
+}
+
+impl From<rmpv::ext::Error> for ProtocolError {
+    fn from(err: rmpv::ext::Error) -> Self {
+        Self::BodySerializationError(FormatError::MsgPackValue(err))
     }
 }
 

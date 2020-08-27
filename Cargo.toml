@@ -27,7 +27,11 @@ name = "celery_app"
 chrono = "0.4"
 tokio = { version = "0.2.13", features = ["full"]}
 serde = { version = "1.0", features = ["derive"]}
-serde_json = "1.0"
+serde_json = { version = "1.0", optional = true }
+rmp-serde = { version = "0.14", optional = true }
+rmpv = { version = "0.4.5", optional = true, features = ["with-serde"] }
+serde_yaml = { version = "0.8", optional = true }
+serde-pickle = { version = "0.6", optional = true }
 failure = "0.1.7"
 async-trait = "0.1"
 lapin = { version = "=1.2.1" }
@@ -50,5 +54,9 @@ exitfailure = "0.5.1"
 structopt = "0.3"
 
 [features]
-default = ["codegen"]
+default = ["codegen", "format-json", "format-rmp", "format-yaml", "format-pickle"]
 codegen = ["celery-codegen", "once_cell"]
+format-json = ["serde_json"]
+format-rmp = ["rmp-serde", "rmpv"]
+format-yaml = ["serde_yaml"]
+format-pickle = ["serde-pickle"]

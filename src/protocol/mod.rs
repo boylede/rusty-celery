@@ -9,13 +9,12 @@ use chrono::{DateTime, Duration, Utc};
 use log::debug;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::convert::TryFrom;
 use std::process;
 use std::time::SystemTime;
 use uuid::Uuid;
 
-use crate::error::ProtocolError;
+use crate::error::{ProtocolError, FormatError};
 use crate::task::{Signature, Task};
 
 static ORIGIN: Lazy<Option<String>> = Lazy::new(|| {
@@ -24,6 +23,14 @@ static ORIGIN: Lazy<Option<String>> = Lazy::new(|| {
         .and_then(|sys_hostname| sys_hostname.into_string().ok())
         .map(|sys_hostname| format!("gen{}@{}", process::id(), sys_hostname))
 });
+
+/// Serialization formats supported for message body
+pub enum MessageFormat {
+    Json,
+    Yaml,
+    Pickle,
+    MsgPack,
+}
 
 /// Create a message with a custom configuration.
 pub struct MessageBuilder<T>
@@ -44,7 +51,7 @@ where
             message: Message {
                 properties: MessageProperties {
                     correlation_id: id.clone(),
-                    content_type: "application/json".into(),
+                    content_type: "application/x-yaml".into(),
                     content_encoding: "utf-8".into(),
                     reply_to: None,
                 },
@@ -58,6 +65,18 @@ where
             },
             params: None,
         }
+    }
+    /// set which serialization method is used in the body
+    pub fn serializer(mut self, format: MessageFormat) -> Self {
+        use MessageFormat::*;
+        let format_name = match format {
+            Json => "application/json",
+            Yaml => "application/x-yaml",
+            Pickle => "application/x-python-serialize",
+            MsgPack => "application/x-msgpack",            
+        };
+        self.message.properties.content_type = format_name.into();
+        self
     }
 
     pub fn time_limit(mut self, time_limit: u32) -> Self {
@@ -101,10 +120,27 @@ where
     pub fn build(mut self) -> Result<Message, ProtocolError> {
         if let Some(params) = self.params.take() {
             let body = MessageBody::<T>::new(params);
-            self.message.raw_body = serde_json::to_vec(&body)?;
+            
+            let raw_body = match self.message.properties.content_type.as_str() {
+                #[cfg(feature = "serde_json")]
+                "application/json" => serde_json::to_vec(&body)?,
+                #[cfg(feature = "serde_yaml")]
+                "application/x-yaml" => serde_yaml::to_vec(&body)?,
+                #[cfg(feature = "serde-pickle")]
+                "application/x-python-serialize" => serde_pickle::to_vec(&body, false)?,
+                #[cfg(feature = "rmp-serde")]
+                "application/x-msgpack" => rmp_serde::to_vec(&body)?,
+                // this would be avoidable if we stored the messageformat enum in the messagebuilder,
+                // but i wasn't sure if that would be an acceptable change to the public-facing type
+                _ => {
+                    panic!("unsupported serialization type");
+                }
+            };
+            self.message.raw_body = raw_body;
         };
         Ok(self.message)
     }
+
 }
 
 /// A `Message` is the core of the Celery protocol and is built on top of a `Broker`'s protocol.
@@ -128,33 +164,161 @@ pub struct Message {
 impl Message {
     /// Try deserializing the body.
     pub fn body<T: Task>(&self) -> Result<MessageBody<T>, ProtocolError> {
-        let value: Value = serde_json::from_slice(&self.raw_body)?;
-        debug!("Deserialized message body: {:?}", value);
-        if let Value::Array(ref vec) = value {
-            if let [Value::Array(ref args), Value::Object(ref kwargs), Value::Object(ref embed)] =
-                vec[..]
-            {
-                if !args.is_empty() {
-                    // Non-empty args, need to try to coerce them into kwargs.
-                    let mut kwargs = kwargs.clone();
-                    let embed = embed.clone();
-                    let arg_names = T::ARGS;
-                    for (i, arg) in args.iter().enumerate() {
-                        if let Some(arg_name) = arg_names.get(i) {
-                            kwargs.insert((*arg_name).into(), arg.clone());
-                        } else {
-                            break;
+        match self.properties.content_type.as_str() {
+            #[cfg(feature = "serde_json")]
+            "application/json" => {
+                use serde_json::{Value, from_slice, from_value};
+                let value: Value = from_slice(&self.raw_body)?;
+                debug!("Deserialized message body: {:?}", value);
+                if let Value::Array(ref vec) = value {
+                    if let [Value::Array(ref args), Value::Object(ref kwargs), Value::Object(ref embed)] =
+                        vec[..]
+                    {
+                        if !args.is_empty() {
+                            // Non-empty args, need to try to coerce them into kwargs.
+                            let mut kwargs = kwargs.clone();
+                            let embed = embed.clone();
+                            let arg_names = T::ARGS;
+                            for (i, arg) in args.iter().enumerate() {
+                                if let Some(arg_name) = arg_names.get(i) {
+                                    kwargs.insert((*arg_name).into(), arg.clone());
+                                } else {
+                                    break;
+                                }
+                            }
+                            return Ok(MessageBody(
+                                vec![],
+                                from_value::<T::Params>(Value::Object(kwargs))?,
+                                from_value::<MessageBodyEmbed>(Value::Object(embed))?,
+                            ));
                         }
                     }
-                    return Ok(MessageBody(
-                        vec![],
-                        serde_json::from_value::<T::Params>(Value::Object(kwargs))?,
-                        serde_json::from_value::<MessageBodyEmbed>(Value::Object(embed))?,
-                    ));
                 }
+                Ok(from_value::<MessageBody<T>>(value)?)
+            },
+            #[cfg(feature = "serde_yaml")]
+            "application/x-yaml" => {
+                use serde_yaml::{Value, from_slice, from_value};
+                let value: Value = from_slice(&self.raw_body)?;
+                debug!("Deserialized message body: {:?}", value);
+                if let Value::Sequence(ref vec) = value {
+                    if let [Value::Sequence(ref args), Value::Mapping(ref kwargs), Value::Mapping(ref embed)] =
+                        vec[..]
+                    {
+                        if !args.is_empty() {
+                            // Non-empty args, need to try to coerce them into kwargs.
+                            let mut kwargs = kwargs.clone();
+                            let embed = embed.clone();
+                            let arg_names = T::ARGS;
+                            for (i, arg) in args.iter().enumerate() {
+                                if let Some(arg_name) = arg_names.get(i) {
+                                    kwargs.insert((*arg_name).into(), arg.clone());
+                                } else {
+                                    break;
+                                }
+                            }
+                            return Ok(MessageBody(
+                                vec![],
+                                from_value::<T::Params>(Value::Mapping(kwargs))?,
+                                from_value::<MessageBodyEmbed>(Value::Mapping(embed))?,
+                            ));
+                        }
+                    }
+                }
+                Ok(from_value(value)?)
+            },
+            #[cfg(feature = "serde-pickle")]
+            "application/x-python-serialize" => {
+                use serde_pickle::{Value, from_slice, from_value, HashableValue};
+                let value: Value = from_slice(&self.raw_body)?;
+                // debug!("Deserialized message body: {:?}", value);
+                if let Value::List(ref vec) = value {
+                    if let [Value::List(ref args), Value::Dict(ref kwargs), Value::Dict(ref embed)] =
+                        vec[..]
+                    {
+                        if !args.is_empty() {
+                            // Non-empty args, need to try to coerce them into kwargs.
+                            let mut kwargs = kwargs.clone();
+                            let embed = embed.clone();
+                            let arg_names = T::ARGS;
+                            for (i, arg) in args.iter().enumerate() {
+                                if let Some(arg_name) = arg_names.get(i) {
+                                    let key = HashableValue::String((*arg_name).into());
+                                    kwargs.insert(key, arg.clone());
+                                } else {
+                                    break;
+                                }
+                            }
+                            return Ok(MessageBody(
+                                vec![],
+                                from_value::<T::Params>(Value::Dict(kwargs))?,
+                                from_value::<MessageBodyEmbed>(Value::Dict(embed))?,
+                            ));
+                        }
+                    }
+                }
+                Ok(from_value(value)?)
+            },
+            #[cfg(feature = "rmp-serde")]
+            "application/x-msgpack" => {
+                use rmp_serde::from_slice;
+                use rmpv::{Value, ext::from_value};
+                let value: Value = from_slice(&self.raw_body)?;
+                debug!("Deserialized message body: {:?}", value);
+                if let Value::Array(ref vec) = value {
+                    if let [Value::Array(ref args), Value::Map(ref kwargs), Value::Map(ref embed)] =
+                        vec[..]
+                    {
+                        if !args.is_empty() {
+                            // Non-empty args, need to try to coerce them into kwargs.
+                            let mut kwargs = kwargs.clone();
+                            let embed = embed.clone();
+                            let arg_names = T::ARGS;
+                            for (i, arg) in args.iter().enumerate() {
+                                if let Some(arg_name) = arg_names.get(i) {
+                                    // messagepack is storing the map as a vec where each item
+                                    // is a tuple of (key, value). here we will look for an item
+                                    // with the matching key and replace it, or insert a new entry
+                                    // at the end of the vec
+                                    let existing_entry = kwargs
+                                        .iter()
+                                        .enumerate()
+                                        .filter(|(_, (key, _))| {
+                                            if let Value::String(key) = key {
+                                                if let Some(key) = key.as_str() {
+                                                    key == *arg_name
+                                                } else {
+                                                    false
+                                                }
+                                            } else {
+                                                false
+                                            }
+                                        })
+                                        .map(|(i, _)| i)
+                                        .next();
+                                    if let Some(index) = existing_entry {
+                                        kwargs.insert(index, ((*arg_name).into(), arg.clone()));
+                                    } else {
+                                        kwargs.push(((*arg_name).into(), arg.clone()));
+                                    }
+                                } else {
+                                    break;
+                                }
+                            }
+                            return Ok(MessageBody(
+                                vec![],
+                                from_value::<T::Params>(Value::Map(kwargs))?,
+                                from_value::<MessageBodyEmbed>(Value::Map(embed))?,
+                            ));
+                        }
+                    }
+                }
+                Ok(from_value(value)?)
+            },
+            _ => {
+                return Err(ProtocolError::BodySerializationError(FormatError::Unknown));
             }
         }
-        Ok(serde_json::from_value::<MessageBody<T>>(value)?)
     }
 
     /// Get thet task ID.
@@ -379,6 +543,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "serde_json")]
     #[test]
     fn test_serialize_body() {
         let body = MessageBody::<TestTask>::new(TestTaskParams { a: 0 });
