@@ -51,7 +51,7 @@ where
             message: Message {
                 properties: MessageProperties {
                     correlation_id: id.clone(),
-                    content_type: "application/x-yaml".into(),
+                    content_type: "application/json".into(),
                     content_encoding: "utf-8".into(),
                     reply_to: None,
                 },
@@ -122,18 +122,15 @@ where
             let body = MessageBody::<T>::new(params);
 
             let raw_body = match self.message.properties.content_type.as_str() {
-                #[cfg(feature = "serde_json")]
                 "application/json" => serde_json::to_vec(&body)?,
-                #[cfg(feature = "serde_yaml")]
+                #[cfg(any(test, feature = "extra_formats"))]
                 "application/x-yaml" => serde_yaml::to_vec(&body)?,
-                #[cfg(feature = "serde-pickle")]
+                #[cfg(any(test, feature = "extra_formats"))]
                 "application/x-python-serialize" => serde_pickle::to_vec(&body, false)?,
-                #[cfg(feature = "rmp-serde")]
+                #[cfg(any(test, feature = "extra_formats"))]
                 "application/x-msgpack" => rmp_serde::to_vec(&body)?,
-                // this would be avoidable if we stored the messageformat enum in the messagebuilder,
-                // but i wasn't sure if that would be an acceptable change to the public-facing type
                 _ => {
-                    panic!("unsupported serialization type");
+                    return Err(ProtocolError::BodySerializationError(FormatError::Unknown));
                 }
             };
             self.message.raw_body = raw_body;
@@ -164,7 +161,6 @@ impl Message {
     /// Try deserializing the body.
     pub fn body<T: Task>(&self) -> Result<MessageBody<T>, ProtocolError> {
         match self.properties.content_type.as_str() {
-            #[cfg(feature = "serde_json")]
             "application/json" => {
                 use serde_json::{from_slice, from_value, Value};
                 let value: Value = from_slice(&self.raw_body)?;
@@ -195,7 +191,7 @@ impl Message {
                 }
                 Ok(from_value::<MessageBody<T>>(value)?)
             }
-            #[cfg(feature = "serde_yaml")]
+            #[cfg(any(test, feature = "extra_formats"))]
             "application/x-yaml" => {
                 use serde_yaml::{from_slice, from_value, Value};
                 let value: Value = from_slice(&self.raw_body)?;
@@ -226,7 +222,7 @@ impl Message {
                 }
                 Ok(from_value(value)?)
             }
-            #[cfg(feature = "serde-pickle")]
+            #[cfg(any(test, feature = "extra_formats"))]
             "application/x-python-serialize" => {
                 use serde_pickle::{from_slice, from_value, HashableValue, Value};
                 let value: Value = from_slice(&self.raw_body)?;
@@ -258,7 +254,7 @@ impl Message {
                 }
                 Ok(from_value(value)?)
             }
-            #[cfg(feature = "rmp-serde")]
+            #[cfg(any(test, feature = "extra_formats"))]
             "application/x-msgpack" => {
                 use rmp_serde::from_slice;
                 use rmpv::{ext::from_value, Value};
@@ -540,14 +536,14 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "serde_json")]
+    const JSON: &str = "[[],{\"a\":4},{\"callbacks\":null,\"errbacks\":null,\"chain\":null,\"chord\":null}]";
     #[test]
     fn test_serialize_body() {
-        let body = MessageBody::<TestTask>::new(TestTaskParams { a: 0 });
+        let body = MessageBody::<TestTask>::new(TestTaskParams { a: 4 });
         let serialized = serde_json::to_string(&body).unwrap();
         assert_eq!(
             serialized,
-            "[[],{\"a\":0},{\"callbacks\":null,\"errbacks\":null,\"chain\":null,\"chord\":null}]"
+            JSON
         );
     }
 
@@ -565,9 +561,96 @@ mod tests {
                 task: "TestTask".into(),
                 ..Default::default()
             },
-            raw_body: Vec::from(&b"[[1],{},{}]"[..]),
+            raw_body: Vec::from(&JSON[..]),
         };
         let body = message.body::<TestTask>().unwrap();
-        assert_eq!(body.1.a, 1);
+        assert_eq!(body.1.a, 4);
+    }
+
+    const YAML: &str = "---\n- []\n- a: 4\n- callbacks: ~\n  errbacks: ~\n  chain: ~\n  chord: ~";
+
+    #[test]
+    fn test_yaml_serialize_body() {
+        let body = MessageBody::<TestTask>::new(TestTaskParams { a: 4 });
+        let serialized = serde_yaml::to_string(&body).unwrap();
+        assert_eq!(serialized, YAML);
+    }
+
+    #[test]
+    fn test_yaml_deserialize_body_with_args() {
+        let message = Message {
+            properties: MessageProperties {
+                correlation_id: "aaa".into(),
+                content_type: "application/x-yaml".into(),
+                content_encoding: "utf-8".into(),
+                reply_to: None,
+            },
+            headers: MessageHeaders {
+                id: "aaa".into(),
+                task: "TestTask".into(),
+                ..Default::default()
+            },
+            raw_body: Vec::from(&YAML[..]),
+        };
+        let body = message.body::<TestTask>().unwrap();
+        assert_eq!(body.1.a, 4);
+    }
+
+    const PICKLE: &[u8] = b"\x80\x02(]}(X\x01\x00\x00\x00aJ\x04\x00\x00\x00u}(X\x09\x00\x00\x00callbacksNX\x08\x00\x00\x00errbacksNX\x05\x00\x00\x00chainNX\x05\x00\x00\x00chordNut.";
+    #[test]
+    fn test_pickle_serialize_body() {
+        let body = MessageBody::<TestTask>::new(TestTaskParams { a: 4 });
+        let serialized = serde_pickle::to_vec(&body, false).unwrap();
+        // println!("{}", String::from_utf8(serialized.split_off(1)).unwrap());
+        assert_eq!(serialized, PICKLE.to_vec());
+    }
+
+    #[test]
+    fn test_pickle_deserialize_body_with_args() {
+        let message = Message {
+            properties: MessageProperties {
+                correlation_id: "aaa".into(),
+                content_type: "application/x-python-serialize".into(),
+                content_encoding: "utf-8".into(),
+                reply_to: None,
+            },
+            headers: MessageHeaders {
+                id: "aaa".into(),
+                task: "TestTask".into(),
+                ..Default::default()
+            },
+            raw_body: PICKLE.to_vec(),
+        };
+        let body = message.body::<TestTask>().unwrap();
+        assert_eq!(body.1.a, 4);
+    }
+
+    const MSGPACK: &[u8] = &[147, 144, 145, 4, 148, 192, 192, 192, 192];
+    #[test]
+    fn test_msgpack_serialize_body() {
+        let body = MessageBody::<TestTask>::new(TestTaskParams { a: 4 });
+        let serialized = rmp_serde::to_vec(&body).unwrap();
+        // println!("{:?}", serialized);
+        assert_eq!(serialized, MSGPACK);
+    }
+
+    #[test]
+    fn test_msgpack_deserialize_body_with_args() {
+        let message = Message {
+            properties: MessageProperties {
+                correlation_id: "aaa".into(),
+                content_type: "application/x-msgpack".into(),
+                content_encoding: "utf-8".into(),
+                reply_to: None,
+            },
+            headers: MessageHeaders {
+                id: "aaa".into(),
+                task: "TestTask".into(),
+                ..Default::default()
+            },
+            raw_body: MSGPACK.to_vec(),
+        };
+        let body = message.body::<TestTask>().unwrap();
+        assert_eq!(body.1.a, 4);
     }
 }
