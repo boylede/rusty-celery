@@ -67,16 +67,22 @@ where
         }
     }
     /// set which serialization method is used in the body
+    /// if feature "extra_formats" is not enabled, this function
+    /// does not do anything and json is used.
     pub fn serializer(mut self, format: MessageFormat) -> Self {
-        use MessageFormat::*;
-        let format_name = match format {
-            Json => "application/json",
-            Yaml => "application/x-yaml",
-            Pickle => "application/x-python-serialize",
-            MsgPack => "application/x-msgpack",
-        };
-        self.message.properties.content_type = format_name.into();
+        #[cfg(any(test, feature = "extra_formats"))] 
+        {
+            use MessageFormat::*;
+            let format_name = match format {
+                Json => "application/json",
+                Yaml => "application/x-yaml",
+                Pickle => "application/x-python-serialize",
+                MsgPack => "application/x-msgpack",
+            };
+            self.message.properties.content_type = format_name.into();
+        }
         self
+        
     }
 
     pub fn time_limit(mut self, time_limit: u32) -> Self {
